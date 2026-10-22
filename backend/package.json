@@ -1,0 +1,26 @@
+{
+  "name": "cloud-time-machine-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Simulation API for Cloud Time Machine",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.650.0",
+    "@aws-sdk/client-dynamodb": "^3.650.0",
+    "@aws-sdk/client-s3": "^3.650.0",
+    "@aws-sdk/client-sfn": "^3.650.0",
+    "@aws-sdk/client-sns": "^3.650.0",
+    "@aws-sdk/client-sqs": "^3.650.0",
+    "@aws-sdk/lib-dynamodb": "^3.650.0",
+    "compression": "^1.7.5",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "helmet": "^8.0.0"
+  }
+}
