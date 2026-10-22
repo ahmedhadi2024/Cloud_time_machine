@@ -26,7 +26,7 @@ Every AWS integration falls back to an in-process implementation when its
 environment variable is absent, so the full application runs on a laptop.
 
 ```bash
-npm run install:all
+npm run install:all    # installs the root, backend and frontend
 npm run dev            # API on :8080, front end on :5173
 ```
 
@@ -35,6 +35,20 @@ Open <http://localhost:5173>.
 ```bash
 npm test               # 45 tests over the engines and the HTTP API
 ```
+
+`install:all` installs three separate `package.json` files, including the one at
+the root, which is where `concurrently` lives. Running `npm install` only in
+`backend/` and `frontend/` leaves `npm run dev` with no way to start both at
+once.
+
+### On Windows
+
+`npm run install:all`, `npm run dev` and `npm test` work in PowerShell and
+Command Prompt as they are.
+
+The deployment scripts are bash, so `npm run build`, `deploy`, `smoke` and
+`destroy` need **Git Bash** or **WSL**. Git Bash ships with Git for Windows;
+open it in the repository folder and run them there.
 
 ## Deploy it to AWS
 

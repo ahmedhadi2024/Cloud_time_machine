@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Simulation API for Cloud Time Machine",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "^3.650.0",
