@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 420" width="980" height="420" role="img" aria-labelledby="t d">
+  <title id="t">Cloud Time Machine deployed architecture</title>
+  <desc id="d">Users reach Route 53 and CloudFront, protected by WAF. Static files come from an S3 bucket; API requests go to an Application Load Balancer and an Auto Scaling Group of EC2 instances across three Availability Zones. The instances use ElastiCache, Multi-AZ RDS, DynamoDB, S3 and SQS. The queue feeds Lambda and Step Functions, which publish to SNS. CloudWatch, KMS, IAM and Budgets span the whole stack.</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5b6a95"/>
+    </marker>
+    <style>
+      .bg { fill: #0b1020; }
+      .box { fill: #161d33; stroke: #38446b; stroke-width: 1.2; rx: 8; }
+      .edgebox { fill: #16253f; stroke: #4f9cf9; }
+      .databox { fill: #1d1b33; stroke: #a78bfa; }
+      .opsbox { fill: #13251f; stroke: #34d399; }
+      .lbl { fill: #e8ecf8; font: 600 12px -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .sub { fill: #9aa5c4; font: 400 10px ui-monospace, Menlo, monospace; }
+      .grp { fill: #6b779b; font: 600 10px -apple-system, sans-serif; letter-spacing: .08em; }
+      .zone { fill: none; stroke: #26304d; stroke-width: 1; stroke-dasharray: 4 4; rx: 10; }
+      .wire { stroke: #5b6a95; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+      .wire-soft { stroke: #38446b; stroke-width: 1.1; fill: none; stroke-dasharray: 3 3; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="980" height="420"/>
+
+  <!-- zones -->
+  <rect class="zone" x="300" y="56" width="368" height="252"/>
+  <text class="grp" x="310" y="74">VPC · 3 AVAILABILITY ZONES</text>
+  <rect class="zone" x="314" y="150" width="340" height="146"/>
+  <text class="grp" x="324" y="167">PRIVATE SUBNETS</text>
+
+  <!-- edge -->
+  <text class="grp" x="24" y="40">EDGE</text>
+  <rect class="box" x="20" y="120" width="100" height="44"/>
+  <text class="lbl" x="34" y="140">Users</text>
+  <text class="sub" x="34" y="154">browser</text>
+
+  <rect class="box edgebox" x="150" y="60" width="118" height="44"/>
+  <text class="lbl" x="164" y="80">Route 53</text>
+  <text class="sub" x="164" y="94">health checks</text>
+
+  <rect class="box edgebox" x="150" y="120" width="118" height="44"/>
+  <text class="lbl" x="164" y="140">CloudFront</text>
+  <text class="sub" x="164" y="154">+ WAF, Shield</text>
+
+  <rect class="box edgebox" x="150" y="180" width="118" height="44"/>
+  <text class="lbl" x="164" y="200">S3 (web)</text>
+  <text class="sub" x="164" y="214">OAC, private</text>
+
+  <!-- compute -->
+  <rect class="box" x="320" y="96" width="118" height="44"/>
+  <text class="lbl" x="334" y="116">ALB</text>
+  <text class="sub" x="334" y="130">3 AZ, health</text>
+
+  <rect class="box" x="320" y="186" width="118" height="52"/>
+  <text class="lbl" x="334" y="206">Auto Scaling</text>
+  <text class="sub" x="334" y="220">EC2 · target</text>
+  <text class="sub" x="334" y="232">tracking</text>
+
+  <rect class="box databox" x="470" y="160" width="118" height="44"/>
+  <text class="lbl" x="484" y="180">ElastiCache</text>
+  <text class="sub" x="484" y="194">hot reads</text>
+
+  <rect class="box databox" x="470" y="218" width="118" height="44"/>
+  <text class="lbl" x="484" y="238">RDS</text>
+  <text class="sub" x="484" y="252">Multi-AZ, KMS</text>
+
+  <!-- data right -->
+  <text class="grp" x="700" y="40">DATA &amp; EVENTS</text>
+  <rect class="box databox" x="700" y="60" width="118" height="44"/>
+  <text class="lbl" x="714" y="80">DynamoDB</text>
+  <text class="sub" x="714" y="94">events, TTL</text>
+
+  <rect class="box databox" x="700" y="120" width="118" height="44"/>
+  <text class="lbl" x="714" y="140">S3 assets</text>
+  <text class="sub" x="714" y="154">→ IA → Glacier</text>
+
+  <rect class="box opsbox" x="700" y="180" width="118" height="44"/>
+  <text class="lbl" x="714" y="200">SQS</text>
+  <text class="sub" x="714" y="214">+ dead letter</text>
+
+  <rect class="box opsbox" x="700" y="240" width="118" height="44"/>
+  <text class="lbl" x="714" y="260">Step Functions</text>
+  <text class="sub" x="714" y="274">+ SNS</text>
+
+  <!-- cross-cutting -->
+  <text class="grp" x="24" y="356">CROSS-CUTTING</text>
+  <rect class="box opsbox" x="20" y="366" width="140" height="38"/>
+  <text class="lbl" x="34" y="390">CloudWatch</text>
+  <rect class="box" x="176" y="366" width="140" height="38"/>
+  <text class="lbl" x="190" y="390">IAM + Secrets</text>
+  <rect class="box" x="332" y="366" width="140" height="38"/>
+  <text class="lbl" x="346" y="390">KMS</text>
+  <rect class="box" x="488" y="366" width="140" height="38"/>
+  <text class="lbl" x="502" y="390">VPC flow logs</text>
+  <rect class="box opsbox" x="644" y="366" width="174" height="38"/>
+  <text class="lbl" x="658" y="390">AWS Budgets → SNS</text>
+
+  <!-- wires -->
+  <path class="wire" d="M120 142 H146"/>
+  <path class="wire" d="M209 104 V116"/>
+  <path class="wire" d="M209 164 V176"/>
+  <path class="wire" d="M268 142 H300 Q316 142 316 122 H316"/>
+  <path class="wire" d="M379 140 V182"/>
+  <path class="wire" d="M438 206 H466"/>
+  <path class="wire" d="M438 212 Q454 212 454 236 H466"/>
+  <path class="wire" d="M438 196 Q620 196 620 82 H696"/>
+  <path class="wire" d="M438 200 Q640 200 640 142 H696"/>
+  <path class="wire" d="M438 204 Q660 204 660 202 H696"/>
+  <path class="wire" d="M759 224 V236"/>
+  <path class="wire-soft" d="M379 238 Q379 330 90 330 V362"/>
+  <path class="wire-soft" d="M529 262 Q529 320 402 320 V362"/>
+</svg>

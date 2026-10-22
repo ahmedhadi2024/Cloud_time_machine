@@ -1,0 +1,339 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud Time Machine - data layer. A KMS key that encrypts everything, a
+  Multi-AZ RDS instance for relational data, DynamoDB tables for the
+  high-volume event log and saved designs, an S3 bucket with lifecycle rules
+  down to Glacier Deep Archive, and the SQS/SNS pair the application uses to
+  decouple slow work from requests.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-time-machine
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    Description: db.t3.micro is free-tier eligible; db.m5.large is the production size.
+  DbMultiAz:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Multi-AZ roughly doubles the instance cost and removes hours of downtime.
+  DbAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+  AlertEmail:
+    Type: String
+    Default: ''
+    Description: Optional address subscribed to the alert topic. Confirm the emailed link.
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+  IsProd: !Equals [!Ref Environment, 'prod']
+
+Resources:
+  # ------------------------------------------------------------------- KMS
+  EncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'Encrypts ${ProjectName} ${Environment} data at rest'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowAwsServices
+            Effect: Allow
+            Principal:
+              Service:
+                - s3.amazonaws.com
+                - sns.amazonaws.com
+                - sqs.amazonaws.com
+                - dynamodb.amazonaws.com
+                - rds.amazonaws.com
+                - logs.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+
+  EncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${Environment}'
+      TargetKeyId: !Ref EncryptionKey
+
+  # ------------------------------------------------------------------ SNS
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-${Environment}-alerts'
+      DisplayName: Cloud Time Machine alerts
+      KmsMasterKeyId: !Ref EncryptionKey
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ------------------------------------------------------------------ SQS
+  SimulationDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-${Environment}-simulation-dlq'
+      MessageRetentionPeriod: 1209600 # 14 days, the maximum
+      KmsMasterKeyId: !Ref EncryptionKey
+
+  SimulationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-${Environment}-simulation'
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 345600
+      KmsMasterKeyId: !Ref EncryptionKey
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SimulationDlq.Arn
+        # Three attempts is enough to ride out a transient error without
+        # replaying a genuinely poisonous message forever.
+        maxReceiveCount: 3
+
+  # ------------------------------------------------------------- DynamoDB
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    # Events are reproducible telemetry, so the table is replaceable.
+    DeletionPolicy: Delete
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-events'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+        - AttributeName: eventId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+        - AttributeName: eventId
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref EncryptionKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+
+  DesignsTable:
+    Type: AWS::DynamoDB::Table
+    # Saved designs are user data, so the table outlives the stack.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ProjectName}-${Environment}-designs'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref EncryptionKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ------------------------------------------------------------------- S3
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-assets-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref EncryptionKey
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: tier-cold-objects
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 120
+              - StorageClass: DEEP_ARCHIVE
+                TransitionInDays: 365
+          - Id: expire-old-versions
+            Status: Enabled
+            # Without this, versioning means a deleted object is stored forever.
+            NoncurrentVersionExpirationInDays: 30
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-web-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          # SSE-S3 rather than KMS: CloudFront reads every object on a cache
+          # miss, and KMS requests on static assets add cost for no benefit.
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+
+  # ------------------------------------------------------------------ RDS
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub '${ProjectName} ${Environment} private subnets'
+      SubnetIds: !Split
+        - ','
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-private-subnets'
+
+  DbSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/${Environment}/database'
+      Description: Credentials for the application database
+      KmsKeyId: !Ref EncryptionKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"ctm_app"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        # RDS forbids these in a master password.
+        ExcludeCharacters: "\"@/\\"
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${ProjectName}-${Environment}'
+      Engine: postgres
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      StorageType: gp3
+      MultiAZ: !Ref DbMultiAz
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DbSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DbSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-db-sg'
+      StorageEncrypted: true
+      KmsKeyId: !Ref EncryptionKey
+      BackupRetentionPeriod: !If [IsProd, 30, 7]
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:30-sun:05:30'
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DeletionProtection: !If [IsProd, true, false]
+      EnableCloudwatchLogsExports:
+        - postgresql
+      PubliclyAccessible: false
+
+  DbSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DbSecret
+      TargetId: !Ref Database
+      TargetType: AWS::RDS::DBInstance
+
+Outputs:
+  EncryptionKeyArn:
+    Value: !GetAtt EncryptionKey.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-kms-arn'
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-alert-topic'
+  SimulationQueueUrl:
+    Value: !Ref SimulationQueue
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-queue-url'
+  SimulationQueueArn:
+    Value: !GetAtt SimulationQueue.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-queue-arn'
+  EventsTableName:
+    Value: !Ref EventsTable
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-events-table'
+  EventsTableArn:
+    Value: !GetAtt EventsTable.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-events-table-arn'
+  DesignsTableName:
+    Value: !Ref DesignsTable
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-designs-table'
+  DesignsTableArn:
+    Value: !GetAtt DesignsTable.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-designs-table-arn'
+  AssetsBucketName:
+    Value: !Ref AssetsBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-assets-bucket'
+  AssetsBucketArn:
+    Value: !GetAtt AssetsBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-assets-bucket-arn'
+  WebBucketName:
+    Value: !Ref WebBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-web-bucket'
+  WebBucketDomainName:
+    Value: !GetAtt WebBucket.RegionalDomainName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-web-bucket-domain'
+  WebBucketArn:
+    Value: !GetAtt WebBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-web-bucket-arn'
+  DbSecretArn:
+    Value: !Ref DbSecret
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-db-secret'
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-db-endpoint'

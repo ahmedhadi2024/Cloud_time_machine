@@ -1,0 +1,418 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud Time Machine - operations layer. The alarms that page a human, a
+  dashboard that answers "is it healthy" in one screen, a Step Functions
+  workflow driven by the queue, and AWS Budgets so a runaway cost is noticed
+  within hours rather than at the end of the month.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-time-machine
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 50
+    MinValue: 1
+  BudgetEmail:
+    Type: String
+    Default: ''
+    Description: Budget alerts need an address of their own; SNS alone is not enough for forecasts.
+
+Conditions:
+  HasBudgetEmail: !Not [!Equals [!Ref BudgetEmail, '']]
+
+Resources:
+  # ---------------------------------------------------------------- alarms
+  UnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-unhealthy-hosts'
+      AlarmDescription: One or more instances have failed their health check.
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-alb-fullname'
+        - Name: TargetGroup
+          Value: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-tg-fullname'
+      AlarmActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+      OKActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  NoHealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-no-healthy-hosts'
+      AlarmDescription: The service is down; no target is passing health checks.
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-alb-fullname'
+        - Name: TargetGroup
+          Value: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-tg-fullname'
+      AlarmActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  ServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-5xx'
+      AlarmDescription: The application is returning server errors.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 25
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-alb-fullname'
+      AlarmActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  LatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-latency'
+      AlarmDescription: p99 response time is past what a user tolerates.
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-alb-fullname'
+      AlarmActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  DeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-dlq-not-empty'
+      AlarmDescription: Messages are failing processing and have landed in the dead-letter queue.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub '${ProjectName}-${Environment}-simulation-dlq'
+      AlarmActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  DatabaseCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-db-cpu'
+      AlarmDescription: The database is the bottleneck.
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub '${ProjectName}-${Environment}'
+      AlarmActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  DatabaseStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-${Environment}-db-storage'
+      AlarmDescription: Less than 2 GB of database storage remains.
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2147483648
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Sub '${ProjectName}-${Environment}'
+      AlarmActions:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  # ------------------------------------------------------------- dashboard
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${ProjectName}-${Environment}'
+      DashboardBody: !Sub
+        - |
+          {
+            "widgets": [
+              {
+                "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Requests and errors",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries", "stacked": false,
+                  "metrics": [
+                    ["AWS/ApplicationELB", "RequestCount", "LoadBalancer", "${AlbName}", {"stat": "Sum"}],
+                    ["AWS/ApplicationELB", "HTTPCode_Target_5XX_Count", "LoadBalancer", "${AlbName}", {"stat": "Sum"}],
+                    ["AWS/ApplicationELB", "HTTPCode_Target_4XX_Count", "LoadBalancer", "${AlbName}", {"stat": "Sum"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Response time",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "metrics": [
+                    ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbName}", {"stat": "p50"}],
+                    ["AWS/ApplicationELB", "TargetResponseTime", "LoadBalancer", "${AlbName}", {"stat": "p99"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Fleet",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "metrics": [
+                    ["AWS/AutoScaling", "GroupInServiceInstances", "AutoScalingGroupName", "${AsgName}"],
+                    ["AWS/EC2", "CPUUtilization", "AutoScalingGroupName", "${AsgName}", {"stat": "Average"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Database",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "metrics": [
+                    ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", "${DbId}"],
+                    ["AWS/RDS", "DatabaseConnections", "DBInstanceIdentifier", "${DbId}"]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 0, "y": 12, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Simulations run",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "metrics": [
+                    ["CloudTimeMachine", "TrafficSimulation", {"stat": "Sum"}],
+                    ["CloudTimeMachine", "ArchitectureViewed", {"stat": "Sum"}]
+                  ]
+                }
+              },
+              {
+                "type": "metric", "x": 12, "y": 12, "width": 12, "height": 6,
+                "properties": {
+                  "title": "Queue depth",
+                  "region": "${AWS::Region}",
+                  "view": "timeSeries",
+                  "metrics": [
+                    ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${QueueName}"],
+                    ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${DlqName}"]
+                  ]
+                }
+              }
+            ]
+          }
+        - AlbName: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-alb-fullname'
+          AsgName: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-asg-name'
+          DbId: !Sub '${ProjectName}-${Environment}'
+          QueueName: !Sub '${ProjectName}-${Environment}-simulation'
+          DlqName: !Sub '${ProjectName}-${Environment}-simulation-dlq'
+
+  # -------------------------------------------------------- Step Functions
+  WorkflowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: workflow-permissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !ImportValue
+                  'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !ImportValue
+                  'Fn::Sub': '${ProjectName}-${Environment}-designs-table-arn'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !ImportValue
+                  'Fn::Sub': '${ProjectName}-${Environment}-kms-arn'
+
+  ScenarioWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-${Environment}-scenario'
+      RoleArn: !GetAtt WorkflowRole.Arn
+      StateMachineType: STANDARD
+      DefinitionString: !Sub
+        - |
+          {
+            "Comment": "Post-processing for a saved architecture: look it up, decide whether it is worth announcing, announce it.",
+            "StartAt": "LoadDesign",
+            "States": {
+              "LoadDesign": {
+                "Type": "Task",
+                "Resource": "arn:${AWS::Partition}:states:::aws-sdk:dynamodb:getItem",
+                "Parameters": {
+                  "TableName": "${DesignsTable}",
+                  "Key": { "id": { "S.$": "$.designId" } }
+                },
+                "ResultPath": "$.design",
+                "Retry": [
+                  {
+                    "ErrorEquals": ["States.TaskFailed", "DynamoDb.ProvisionedThroughputExceededException"],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                  }
+                ],
+                "Catch": [
+                  { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "ReportFailure" }
+                ],
+                "Next": "IsNoteworthy"
+              },
+              "IsNoteworthy": {
+                "Type": "Choice",
+                "Choices": [
+                  {
+                    "Variable": "$.design.Item.score.N",
+                    "IsPresent": true,
+                    "Next": "Announce"
+                  }
+                ],
+                "Default": "Done"
+              },
+              "Announce": {
+                "Type": "Task",
+                "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+                "Parameters": {
+                  "TopicArn": "${AlertTopic}",
+                  "Subject": "Cloud Time Machine: a design was saved",
+                  "Message.$": "States.Format('Design {} scored {}.', $.designId, $.design.Item.score.N)"
+                },
+                "End": true
+              },
+              "ReportFailure": {
+                "Type": "Task",
+                "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+                "Parameters": {
+                  "TopicArn": "${AlertTopic}",
+                  "Subject": "Cloud Time Machine: workflow failed",
+                  "Message.$": "States.JsonToString($.error)"
+                },
+                "End": true
+              },
+              "Done": { "Type": "Succeed" }
+            }
+          }
+        - DesignsTable: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-designs-table'
+          AlertTopic: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+
+  # --------------------------------------------------------------- budgets
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${ProjectName}-${Environment}-monthly'
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers: !If
+        - HasBudgetEmail
+        - - Notification:
+              NotificationType: ACTUAL
+              ComparisonOperator: GREATER_THAN
+              Threshold: 80
+              ThresholdType: PERCENTAGE
+            Subscribers:
+              - SubscriptionType: EMAIL
+                Address: !Ref BudgetEmail
+          - Notification:
+              NotificationType: FORECASTED
+              ComparisonOperator: GREATER_THAN
+              Threshold: 100
+              ThresholdType: PERCENTAGE
+            Subscribers:
+              - SubscriptionType: EMAIL
+                Address: !Ref BudgetEmail
+        - !Ref 'AWS::NoValue'
+
+Outputs:
+  DashboardUrl:
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-${Environment}'
+  StateMachineArn:
+    Value: !Ref ScenarioWorkflow
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-state-machine'

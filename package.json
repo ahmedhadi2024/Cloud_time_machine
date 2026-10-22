@@ -1,0 +1,22 @@
+{
+  "name": "cloud-time-machine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Travel through the evolution of cloud architecture, then design the modern AWS version yourself.",
+  "scripts": {
+    "install:all": "npm --prefix backend install && npm --prefix frontend install",
+    "dev": "concurrently -n api,web -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "dev:api": "npm --prefix backend run dev",
+    "dev:web": "npm --prefix frontend run dev",
+    "test": "npm --prefix backend test",
+    "build": "./infrastructure/scripts/build.sh",
+    "deploy": "./infrastructure/scripts/deploy.sh",
+    "smoke": "./infrastructure/scripts/smoke.sh",
+    "destroy": "./infrastructure/scripts/destroy.sh",
+    "lint:infra": "cfn-lint infrastructure/cloudformation/*.yaml"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": { "node": ">=20" }
+}

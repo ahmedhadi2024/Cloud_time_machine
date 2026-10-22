@@ -1,0 +1,440 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud Time Machine - application layer. An Application Load Balancer across
+  three AZs in front of an Auto Scaling Group of EC2 instances that run the
+  API, with an instance role scoped to exactly the tables, bucket, queue and
+  topic the application uses.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloud-time-machine
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+  InstanceType:
+    Type: String
+    Default: t3.small
+    Description: t3.micro is free-tier eligible; t3.small is the smallest comfortable size.
+  MinSize:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  MaxSize:
+    Type: Number
+    Default: 6
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+  OriginSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: >
+      Shared secret CloudFront sends as x-origin-secret. The listener rejects
+      any request without it, so the load balancer cannot be used directly even
+      when its security group allows the whole internet.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: Resolved at deploy time, so a stack update picks up a patched AMI.
+  AppVersion:
+    Type: String
+    Default: dev
+    Description: Written into the instance environment and reported by /readyz.
+
+Resources:
+  # ------------------------------------------------------------------- IAM
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Session Manager replaces SSH, so no key pair and no port 22.
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy'
+      Policies:
+        - PolicyName: app-data-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EventAndDesignTables
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !ImportValue
+                    'Fn::Sub': '${ProjectName}-${Environment}-events-table-arn'
+                  - !ImportValue
+                    'Fn::Sub': '${ProjectName}-${Environment}-designs-table-arn'
+              - Sid: SavedDesignObjects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub
+                  - '${BucketArn}/designs/*'
+                  - BucketArn: !ImportValue
+                      'Fn::Sub': '${ProjectName}-${Environment}-assets-bucket-arn'
+              - Sid: QueueAndTopic
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !ImportValue
+                  'Fn::Sub': '${ProjectName}-${Environment}-queue-arn'
+              - Sid: PublishAlerts
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !ImportValue
+                  'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+              - Sid: UseEncryptionKey
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !ImportValue
+                  'Fn::Sub': '${ProjectName}-${Environment}-kms-arn'
+              - Sid: ReadDatabaseCredentials
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !ImportValue
+                  'Fn::Sub': '${ProjectName}-${Environment}-db-secret'
+              - Sid: PublishMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': CloudTimeMachine
+              - Sid: ReadDeploymentArtifact
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub
+                  - '${BucketArn}/releases/*'
+                  - BucketArn: !ImportValue
+                      'Fn::Sub': '${ProjectName}-${Environment}-assets-bucket-arn'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ----------------------------------------------------------- log groups
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${ProjectName}/${Environment}/api'
+      RetentionInDays: 30
+
+  # --------------------------------------------------------- load balancer
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-alb'
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-alb-sg'
+      Subnets: !Split
+        - ','
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-public-subnets'
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '60'
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-tg'
+      VpcId: !ImportValue
+        'Fn::Sub': '${ProjectName}-${Environment}-vpc-id'
+      Port: 8080
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        # Long enough for in-flight simulations to finish during a deploy.
+        - Key: deregistration_delay.timeout_seconds
+          Value: '30'
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        # Anything that is not CloudFront gets a flat refusal.
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: '403'
+            ContentType: text/plain
+            MessageBody: Direct access is not permitted. Use the CloudFront endpoint.
+
+  CloudFrontOnlyRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: x-origin-secret
+            Values:
+              - !Ref OriginSecret
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ----------------------------------------------------------- compute tier
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${ProjectName}-${Environment}-lt'
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        SecurityGroupIds:
+          - !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-app-sg'
+        MetadataOptions:
+          # IMDSv2 only: a server-side request forgery cannot read credentials.
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        Monitoring:
+          Enabled: true
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-${Environment}-api'
+        UserData:
+          Fn::Base64: !Sub
+            - |
+              #!/bin/bash
+              set -euo pipefail
+
+              dnf update -y
+              dnf install -y nodejs22 amazon-cloudwatch-agent
+
+              install -d -o root -g root /opt/ctm
+              aws s3 cp "s3://${AssetsBucket}/releases/${AppVersion}/api.tar.gz" /tmp/api.tar.gz
+              tar -xzf /tmp/api.tar.gz -C /opt/ctm
+
+              cat >/etc/ctm.env <<ENVFILE
+              NODE_ENV=production
+              PORT=8080
+              AWS_REGION=${AWS::Region}
+              APP_VERSION=${AppVersion}
+              EVENTS_TABLE=${EventsTable}
+              DESIGNS_TABLE=${DesignsTable}
+              ASSETS_BUCKET=${AssetsBucket}
+              NOTIFICATION_TOPIC_ARN=${AlertTopic}
+              SIMULATION_QUEUE_URL=${QueueUrl}
+              METRIC_NAMESPACE=CloudTimeMachine
+              CORS_ORIGINS=*
+              ENVFILE
+
+              cat >/etc/systemd/system/ctm-api.service <<'UNIT'
+              [Unit]
+              Description=Cloud Time Machine API
+              After=network-online.target
+              Wants=network-online.target
+
+              [Service]
+              Type=simple
+              WorkingDirectory=/opt/ctm
+              EnvironmentFile=/etc/ctm.env
+              ExecStart=/usr/bin/node src/server.js
+              Restart=always
+              RestartSec=3
+              User=ec2-user
+              # The service needs no write access to its own code.
+              ProtectSystem=strict
+              PrivateTmp=true
+              NoNewPrivileges=true
+              StandardOutput=journal
+              StandardError=journal
+
+              [Install]
+              WantedBy=multi-user.target
+              UNIT
+
+              chown -R ec2-user:ec2-user /opt/ctm
+              systemctl daemon-reload
+              systemctl enable --now ctm-api
+
+              cat >/opt/aws/amazon-cloudwatch-agent/etc/ctm.json <<CWCONF
+              {
+                "logs": {
+                  "logs_collected": {
+                    "files": {
+                      "collect_list": [
+                        {
+                          "file_path": "/var/log/messages",
+                          "log_group_name": "${LogGroup}",
+                          "log_stream_name": "{instance_id}/system"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "metrics": {
+                  "namespace": "CloudTimeMachine",
+                  "append_dimensions": { "AutoScalingGroupName": "\${!aws:AutoScalingGroupName}" },
+                  "metrics_collected": {
+                    "mem": { "measurement": ["mem_used_percent"] },
+                    "disk": { "measurement": ["used_percent"], "resources": ["/"] }
+                  }
+                }
+              }
+              CWCONF
+
+              /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+                -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/ctm.json -s
+
+              # Report the instance as unhealthy rather than serving errors if
+              # the API never came up.
+              for i in $(seq 1 30); do
+                if curl -fsS http://localhost:8080/healthz >/dev/null; then exit 0; fi
+                sleep 2
+              done
+              exit 1
+            - AssetsBucket: !ImportValue
+                'Fn::Sub': '${ProjectName}-${Environment}-assets-bucket'
+              EventsTable: !ImportValue
+                'Fn::Sub': '${ProjectName}-${Environment}-events-table'
+              DesignsTable: !ImportValue
+                'Fn::Sub': '${ProjectName}-${Environment}-designs-table'
+              AlertTopic: !ImportValue
+                'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+              QueueUrl: !ImportValue
+                'Fn::Sub': '${ProjectName}-${Environment}-queue-url'
+              LogGroup: !Ref AppLogGroup
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: !Ref MinSize
+        MaxBatchSize: 1
+        PauseTime: PT5M
+        WaitOnResourceSignals: false
+        SuspendProcesses: [HealthCheck, ReplaceUnhealthy, AZRebalance, AlarmNotification, ScheduledActions]
+    Properties:
+      AutoScalingGroupName: !Sub '${ProjectName}-${Environment}-asg'
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      VPCZoneIdentifier: !Split
+        - ','
+        - !ImportValue
+          'Fn::Sub': '${ProjectName}-${Environment}-private-subnets'
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      MetricsCollection:
+        - Granularity: 1Minute
+      NotificationConfigurations:
+        - TopicARN: !ImportValue
+            'Fn::Sub': '${ProjectName}-${Environment}-alert-topic'
+          NotificationTypes:
+            - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+            - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-api'
+          PropagateAtLaunch: true
+
+  # Target tracking keeps average CPU near 55%, which leaves enough headroom
+  # for the two to three minutes a new instance takes to start serving.
+  CpuTrackingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 55
+        DisableScaleIn: false
+
+  RequestTrackingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Join
+            - '/'
+            - - !GetAtt LoadBalancer.LoadBalancerFullName
+              - !GetAtt TargetGroup.TargetGroupFullName
+        TargetValue: 1200
+
+Outputs:
+  LoadBalancerDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-alb-dns'
+  LoadBalancerArn:
+    Value: !Ref LoadBalancer
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-alb-arn'
+  LoadBalancerFullName:
+    Value: !GetAtt LoadBalancer.LoadBalancerFullName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-alb-fullname'
+  TargetGroupFullName:
+    Value: !GetAtt TargetGroup.TargetGroupFullName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-tg-fullname'
+  AutoScalingGroupName:
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-asg-name'
+  AppLogGroupName:
+    Value: !Ref AppLogGroup
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-app-log-group'
