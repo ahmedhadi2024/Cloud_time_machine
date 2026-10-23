@@ -14,6 +14,7 @@
     "smoke": "./infrastructure/scripts/smoke.sh",
     "destroy": "./infrastructure/scripts/destroy.sh",
     "deploy:academy": "bash infrastructure/scripts/academy-deploy.sh",
+    "verify:academy": "bash infrastructure/scripts/academy-verify.sh",
     "destroy:academy": "bash infrastructure/scripts/academy-destroy.sh",
     "lint:infra": "cfn-lint infrastructure/cloudformation/*.yaml",
     "services": "node infrastructure/scripts/list-services.mjs"
