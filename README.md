@@ -162,15 +162,25 @@ trade-offs, which is robust; the third significant figure is not.
 
 ## AWS services used
 
-Deployed by the templates: **EC2**, **Auto Scaling**, **Application Load
-Balancer**, **S3** (+ Glacier lifecycle tiers), **EBS**, **CloudFront**,
-**RDS** (Multi-AZ optional), **DynamoDB**, **IAM**, **VPC**, **Security
-Groups**, **SNS**, **SQS**, **Step Functions**, **CloudWatch**, **KMS**, **AWS
-Budgets**, **WAF**, **Secrets Manager**, **Systems Manager**, **VPC Endpoints**,
-**VPC Flow Logs**.
+**24 services, 82 resources** across the five stacks:
 
-Modelled in the simulator as well: ElastiCache, Aurora, Lambda, ECS on Fargate,
-Route 53, Shield Advanced.
+**EC2** · **Auto Scaling** · **Application Load Balancer** · **S3**
+(+ **Glacier** lifecycle tiers) · **EBS** · **CloudFront** · **RDS** (Multi-AZ
+optional) · **DynamoDB** · **IAM** · **VPC** · **Security Groups** · **VPC
+Endpoints** · **VPC Flow Logs** · **SNS** · **SQS** · **Step Functions** ·
+**CloudWatch** · **KMS** · **AWS Budgets** · **WAF** · **Shield Standard** ·
+**Secrets Manager** · **Systems Manager** · **CloudWatch Logs**.
+
+```bash
+npm run services       # prints the list, counted from the templates themselves
+```
+
+That command parses `infrastructure/cloudformation/*.yaml` rather than reading a
+hand-kept list, so the count cannot drift away from what is actually deployed.
+
+Modelled in the simulator as well, and draggable in the builder, but not part of
+the deployed stack: ElastiCache, Aurora, Lambda, ECS on Fargate, Route 53,
+Shield Advanced.
 
 ## Documentation
 

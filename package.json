@@ -13,7 +13,8 @@
     "deploy": "./infrastructure/scripts/deploy.sh",
     "smoke": "./infrastructure/scripts/smoke.sh",
     "destroy": "./infrastructure/scripts/destroy.sh",
-    "lint:infra": "cfn-lint infrastructure/cloudformation/*.yaml"
+    "lint:infra": "cfn-lint infrastructure/cloudformation/*.yaml",
+    "services": "node infrastructure/scripts/list-services.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
