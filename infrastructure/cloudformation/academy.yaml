@@ -45,8 +45,13 @@ Parameters:
       Lab; the restrictions documentation names this and LabRole as the roles
       students must reuse rather than create.
   LatestAmiId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Type: AWS::EC2::Image::Id
+    Description: >
+      Resolved by academy-deploy.sh and passed in, rather than looked up here
+      through an AWS::SSM::Parameter::Value type. A Learner Lab can deny
+      reading the public SSM parameter store, and that denial surfaces as an
+      opaque early-validation failure at changeset creation rather than as a
+      permissions error.
 
 Resources:
   # ------------------------------------------------------------------ network

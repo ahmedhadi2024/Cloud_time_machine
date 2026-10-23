@@ -37,13 +37,61 @@ BUCKET="${PROJECT_NAME}-assets-${ACCOUNT_ID}"
 log "Deploying ${PROJECT_NAME} to ${AWS_REGION} in account ${ACCOUNT_ID}"
 info "Version ${APP_VERSION}"
 
-# Learner Lab denies creating IAM roles, so the launch template reuses the
-# profile the lab provides. Check it exists before spending ten minutes
-# discovering it does not.
-if ! aws iam get-instance-profile --instance-profile-name LabInstanceProfile >/dev/null 2>&1; then
-  info "WARNING: LabInstanceProfile not found. If this is not a Learner Lab account,"
-  info "         pass INSTANCE_PROFILE_NAME=<your profile> or use the full deployment."
+# ------------------------------------------------------ resolve what exists
+# Both of these are referenced by the template but created by the lab, not by
+# us. CloudFormation checks they exist while building the changeset, and when
+# one is missing or unreadable it fails with an opaque
+# AWS::EarlyValidation::ResourceExistenceCheck rather than naming it. Resolving
+# them here turns that into a clear message before anything is deployed.
+
+log "Checking what this account provides"
+
+# The instance profile. Learner Labs have shipped it under more than one name.
+PROFILE="${INSTANCE_PROFILE_NAME:-}"
+if [[ -z "$PROFILE" ]]; then
+  for candidate in LabInstanceProfile LabRole EMR_EC2_DefaultRole; do
+    if aws iam get-instance-profile --instance-profile-name "$candidate" >/dev/null 2>&1; then
+      PROFILE="$candidate"
+      break
+    fi
+  done
 fi
+if [[ -z "$PROFILE" ]]; then
+  # iam:GetInstanceProfile can itself be denied, so fall back to listing.
+  PROFILE="$(aws iam list-instance-profiles \
+    --query "InstanceProfiles[?contains(InstanceProfileName, 'Lab')].InstanceProfileName | [0]" \
+    --output text 2>/dev/null || echo 'None')"
+  [[ "$PROFILE" == "None" ]] && PROFILE=""
+fi
+[[ -n "$PROFILE" ]] || die "$(cat <<'MSG'
+Could not find an instance profile to use.
+
+This account has no LabInstanceProfile, and none could be listed. Run:
+    aws iam list-instance-profiles --query "InstanceProfiles[*].InstanceProfileName"
+then re-run with the name it shows:
+    INSTANCE_PROFILE_NAME=<name> npm run deploy:academy
+MSG
+)"
+info "Instance profile: ${PROFILE}"
+
+# The AMI. Reading it here rather than through an SSM parameter type in the
+# template means a denied SSM read fails here, with a reason attached.
+AMI_ID="${AMI_ID:-}"
+if [[ -z "$AMI_ID" ]]; then
+  AMI_ID="$(aws ssm get-parameter \
+    --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 \
+    --query Parameter.Value --output text --region "$AWS_REGION" 2>/dev/null || echo '')"
+fi
+if [[ -z "$AMI_ID" || "$AMI_ID" == "None" ]]; then
+  info "SSM parameter unavailable; searching for the newest Amazon Linux 2023 image"
+  AMI_ID="$(aws ec2 describe-images \
+    --owners amazon \
+    --filters 'Name=name,Values=al2023-ami-2023.*-x86_64' 'Name=state,Values=available' \
+    --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+    --output text --region "$AWS_REGION" 2>/dev/null || echo '')"
+fi
+[[ -n "$AMI_ID" && "$AMI_ID" != "None" ]] || die "Could not resolve an Amazon Linux 2023 AMI. Pass one with AMI_ID=ami-xxxxxxxx."
+info "AMI: ${AMI_ID}"
 
 # ---------------------------------------------------------------------- build
 log "Building the application bundle"
@@ -79,6 +127,17 @@ aws s3 cp "$BUILD_DIR/api.tar.gz" \
 info "Uploaded releases/${APP_VERSION}/api.tar.gz"
 
 # --------------------------------------------------------------------- deploy
+# A changeset that fails validation leaves the stack in REVIEW_IN_PROGRESS with
+# nothing in it, and a failed first create leaves ROLLBACK_COMPLETE. Both block
+# the next deploy, and neither holds any resources, so clear them out.
+STACK_STATE="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" \
+  --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'NONE')"
+if [[ "$STACK_STATE" == "REVIEW_IN_PROGRESS" || "$STACK_STATE" == "ROLLBACK_COMPLETE" ]]; then
+  log "Clearing the empty stack left by a previous failed attempt (${STACK_STATE})"
+  aws cloudformation delete-stack --stack-name "$STACK" --region "$AWS_REGION"
+  aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$AWS_REGION" || true
+fi
+
 log "Deploying the stack (takes about 5 minutes)"
 aws cloudformation deploy \
   --stack-name "$STACK" \
@@ -91,7 +150,8 @@ aws cloudformation deploy \
     "AppVersion=${APP_VERSION}" \
     "InstanceType=${INSTANCE_TYPE}" \
     "DesiredCapacity=${DESIRED_CAPACITY}" \
-    "InstanceProfileName=${INSTANCE_PROFILE_NAME:-LabInstanceProfile}"
+    "InstanceProfileName=${PROFILE}" \
+    "LatestAmiId=${AMI_ID}"
 
 SITE_URL="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" \
   --query "Stacks[0].Outputs[?OutputKey=='SiteUrl'].OutputValue" --output text)"
