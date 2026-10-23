@@ -69,6 +69,36 @@ npm run smoke          # verifies the deployed site end to end
 npm run destroy        # tears it down (keeps data-bearing resources)
 ```
 
+### Deploying in an AWS Academy Learner Lab
+
+A Learner Lab account cannot create IAM roles, and its allow-list excludes
+CloudFront, WAF, Route 53, Budgets and customer-managed KMS keys, so the five
+production stacks will not deploy there. `academy.yaml` is a reduced single
+stack that does, using the lab's pre-made `LabInstanceProfile`:
+
+```bash
+# From AWS CloudShell inside the lab (no credentials to copy), or from Git Bash
+# after pasting the lab's CLI credentials into ~/.aws/credentials:
+npm run deploy:academy     # ~5 minutes, prints the site URL
+npm run destroy:academy
+```
+
+| Kept | Dropped, and what replaces it |
+| --- | --- |
+| VPC, subnets, security groups | NAT gateway — instances sit in public subnets, reachable only from the load balancer |
+| EC2, EBS, Auto Scaling, ALB | CloudFront — the app is served straight from the load balancer |
+| S3, DynamoDB, SNS, SQS, CloudWatch | WAF, Route 53, Budgets |
+| | KMS customer keys — AWS-managed encryption instead |
+| | IAM roles — reuses `LabInstanceProfile` |
+| | RDS — unused by the app, and slow to create in a 4-hour session |
+
+With no CDN there is nowhere to host the front end separately, so the API
+serves it from `./public` on the same origin. `src/app.js` picks that directory
+up when it exists, which is why the same image works in both deployments.
+
+Learner Lab sessions expire and may wipe resources between sittings, so
+redeploy on the day you need it.
+
 ### What you have to do yourself
 
 Four things, and nothing else:

@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Cloud Time Machine - AWS Academy Learner Lab edition. One stack, deliberately
+  reduced to the services a Learner Lab account is allowed to create.
+
+  Differences from the five-stack production deployment, and why:
+    - No IAM roles. Learner Lab denies iam:CreateRole, so this uses the
+      pre-existing LabInstanceProfile instead of creating its own.
+    - No CloudFront, WAF, Route 53, Budgets or customer-managed KMS keys.
+      These are outside the Learner Lab service allow-list.
+    - No NAT gateway. Instances sit in public subnets, which saves about $34
+      a month against a small lab budget. The security group still permits
+      inbound traffic only from the load balancer.
+    - The front end is served by the application itself rather than from S3
+      behind a CDN, so the whole site lives on one origin.
+    - No RDS. The application persists to DynamoDB and S3; an RDS instance
+      would spend ten minutes of a four-hour lab session doing nothing.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: ctm-academy
+    AllowedPattern: '[a-z0-9-]+'
+  ReleaseBucket:
+    Type: String
+    Description: Bucket holding the release tarball. academy-deploy.sh creates and fills it.
+  AppVersion:
+    Type: String
+    Default: dev
+    Description: Release prefix inside the bucket; changing it replaces the instances.
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+  DesiredCapacity:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 4
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: >
+      The instance profile AWS Academy pre-creates. Leave as-is in a Learner
+      Lab; the restrictions documentation names this and LabRole as the roles
+      students must reuse rather than create.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+
+Resources:
+  # ------------------------------------------------------------------ network
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.30.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # Two AZs is the minimum an Application Load Balancer accepts, and it is
+  # still enough to demonstrate surviving the loss of one.
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.30.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-a'
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.30.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-subnet-b'
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rt'
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  AssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref RouteTable
+
+  AssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref RouteTable
+
+  # ---------------------------------------------------------- security groups
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public entry point for the load balancer
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from anywhere
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-alb-sg'
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Application tier; reachable only from the load balancer
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        # The instances have public IPs so they can install packages, but this
+        # rule means nothing on the internet can reach the application except
+        # through the load balancer.
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+          Description: Application traffic from the load balancer only
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-app-sg'
+
+  # --------------------------------------------------------------------- data
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    Properties:
+      TableName: !Sub '${ProjectName}-events'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+        - AttributeName: eventId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+        - AttributeName: eventId
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      # SSE with an AWS-owned key: a customer-managed KMS key is outside the
+      # Learner Lab allow-list.
+      SSESpecification:
+        SSEEnabled: true
+
+  DesignsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    Properties:
+      TableName: !Sub '${ProjectName}-designs'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+
+  AssetsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub '${ProjectName}-assets-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: tier-cold-objects
+            Status: Enabled
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: 30
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 120
+
+  # ---------------------------------------------------------------- messaging
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}-alerts'
+
+  SimulationDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-simulation-dlq'
+      MessageRetentionPeriod: 1209600
+
+  SimulationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-simulation'
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SimulationDlq.Arn
+        maxReceiveCount: 3
+
+  # ------------------------------------------------------------------ compute
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/${ProjectName}/api'
+      RetentionInDays: 1
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-alb'
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-tg'
+      VpcId: !Ref Vpc
+      Port: 8080
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '15'
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      # No CloudFront in front of this one, so the listener forwards directly
+      # rather than demanding an origin secret.
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${ProjectName}-lt'
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          # Referenced by name: Learner Lab pre-creates this and denies
+          # creating a replacement.
+          Name: !Ref InstanceProfileName
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 16
+              VolumeType: gp3
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-api'
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            exec > >(tee /var/log/ctm-bootstrap.log) 2>&1
+
+            dnf install -y nodejs22 || dnf install -y nodejs
+
+            install -d /opt/ctm
+            aws s3 cp "s3://${ReleaseBucket}/releases/${AppVersion}/api.tar.gz" /tmp/api.tar.gz
+            tar -xzf /tmp/api.tar.gz -C /opt/ctm
+            chown -R ec2-user:ec2-user /opt/ctm
+
+            cat >/etc/ctm.env <<ENVFILE
+            NODE_ENV=production
+            PORT=8080
+            AWS_REGION=${AWS::Region}
+            APP_VERSION=${AppVersion}
+            EVENTS_TABLE=${EventsTable}
+            DESIGNS_TABLE=${DesignsTable}
+            ASSETS_BUCKET=${AssetsBucket}
+            NOTIFICATION_TOPIC_ARN=${AlertTopic}
+            SIMULATION_QUEUE_URL=${SimulationQueue}
+            METRIC_NAMESPACE=CloudTimeMachine
+            CORS_ORIGINS=*
+            ENVFILE
+
+            cat >/etc/systemd/system/ctm-api.service <<'UNIT'
+            [Unit]
+            Description=Cloud Time Machine API
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            Type=simple
+            WorkingDirectory=/opt/ctm
+            EnvironmentFile=/etc/ctm.env
+            ExecStart=/usr/bin/node src/server.js
+            Restart=always
+            RestartSec=3
+            User=ec2-user
+
+            [Install]
+            WantedBy=multi-user.target
+            UNIT
+
+            systemctl daemon-reload
+            systemctl enable --now ctm-api
+
+            # Fail the boot if the API never answers, so the instance is
+            # replaced instead of sitting there failing health checks.
+            for _ in $(seq 1 30); do
+              if curl -fsS http://localhost:8080/healthz >/dev/null; then exit 0; fi
+              sleep 2
+            done
+            exit 1
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub '${ProjectName}-asg'
+      MinSize: 1
+      MaxSize: 4
+      DesiredCapacity: !Ref DesiredCapacity
+      VPCZoneIdentifier:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api'
+          PropagateAtLaunch: true
+
+  CpuScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 60
+
+  # ------------------------------------------------------------------- alarms
+  NoHealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-no-healthy-hosts'
+      AlarmDescription: No target is passing health checks.
+      Namespace: AWS/ApplicationELB
+      MetricName: HealthyHostCount
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+      AlarmActions:
+        - !Ref AlertTopic
+
+  ServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ProjectName}-5xx'
+      AlarmDescription: The application is returning server errors.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 25
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+      AlarmActions:
+        - !Ref AlertTopic
+
+Outputs:
+  SiteUrl:
+    Description: Open this in a browser once the targets are healthy.
+    Value: !Sub 'http://${LoadBalancer.DNSName}'
+  LoadBalancerDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+  AssetsBucketName:
+    Value: !Ref AssetsBucket
+  EventsTableName:
+    Value: !Ref EventsTable
+  DesignsTableName:
+    Value: !Ref DesignsTable
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  SimulationQueueUrl:
+    Value: !Ref SimulationQueue

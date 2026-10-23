@@ -10,3 +10,4 @@ coverage/
 .aws-sam/
 packaged-*.yaml
 .build/
+.build-academy/

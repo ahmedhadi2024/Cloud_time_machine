@@ -62,7 +62,15 @@ const IMPLICIT = [
   ['AWS Shield Standard', 'Automatic and free with CloudFront and the ALB'],
 ];
 
-const templates = readdirSync(templateDir).filter((f) => f.endsWith('.yaml')).sort();
+/**
+ * academy.yaml is a reduced variant for AWS Academy Learner Lab, not part of
+ * the production deployment, so counting it here would overstate what the five
+ * numbered stacks actually create. It is reported separately at the end.
+ */
+const VARIANTS = new Set(['academy.yaml']);
+
+const allTemplates = readdirSync(templateDir).filter((f) => f.endsWith('.yaml')).sort();
+const templates = allTemplates.filter((f) => !VARIANTS.has(f));
 const byService = new Map();
 
 for (const file of templates) {
@@ -106,5 +114,20 @@ for (const [name, why] of IMPLICIT) {
 
 console.log(
   `\n${rows.length} services with declared resources + ${IMPLICIT.length} implicit = ` +
-    `${rows.length + IMPLICIT.length} services, ${totalResources} resources across ${templates.length} stacks.\n`,
+    `${rows.length + IMPLICIT.length} services, ${totalResources} resources across ${templates.length} stacks.`,
 );
+
+for (const variant of allTemplates.filter((f) => VARIANTS.has(f))) {
+  const body = readFileSync(join(templateDir, variant), 'utf8');
+  const services = new Set();
+  let count = 0;
+  for (const match of body.matchAll(/Type:\s+AWS::([A-Za-z0-9]+)::([A-Za-z0-9]+)/g)) {
+    services.add(serviceFor(match[1], match[2]));
+    count += 1;
+  }
+  console.log(
+    `\nVariant ${variant}: ${services.size} services, ${count} resources ` +
+      '(reduced for AWS Academy Learner Lab; not counted above).',
+  );
+}
+console.log();
