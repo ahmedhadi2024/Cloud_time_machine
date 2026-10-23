@@ -204,29 +204,13 @@ Resources:
       SSESpecification:
         SSEEnabled: true
 
-  AssetsBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Delete
-    Properties:
-      BucketName: !Sub '${ProjectName}-assets-${AWS::AccountId}'
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-      LifecycleConfiguration:
-        Rules:
-          - Id: tier-cold-objects
-            Status: Enabled
-            Transitions:
-              - StorageClass: STANDARD_IA
-                TransitionInDays: 30
-              - StorageClass: GLACIER_IR
-                TransitionInDays: 120
+  # The release bucket is deliberately NOT declared here. Instances download
+  # the application tarball from it while booting, so it has to exist and be
+  # populated before this stack is created. academy-deploy.sh creates it,
+  # applies its encryption and lifecycle rules, and passes the name in as
+  # ReleaseBucket; academy-destroy.sh removes it. Declaring it here as well
+  # would ask CloudFormation to create a bucket that already exists, which
+  # fails changeset validation with AWS::EarlyValidation::ResourceExistenceCheck.
 
   # ---------------------------------------------------------------- messaging
   AlertTopic:
@@ -344,7 +328,7 @@ Resources:
             APP_VERSION=${AppVersion}
             EVENTS_TABLE=${EventsTable}
             DESIGNS_TABLE=${DesignsTable}
-            ASSETS_BUCKET=${AssetsBucket}
+            ASSETS_BUCKET=${ReleaseBucket}
             NOTIFICATION_TOPIC_ARN=${AlertTopic}
             SIMULATION_QUEUE_URL=${SimulationQueue}
             METRIC_NAMESPACE=CloudTimeMachine
@@ -461,7 +445,8 @@ Outputs:
   LoadBalancerDnsName:
     Value: !GetAtt LoadBalancer.DNSName
   AssetsBucketName:
-    Value: !Ref AssetsBucket
+    Description: Created and owned by academy-deploy.sh, not by this stack.
+    Value: !Ref ReleaseBucket
   EventsTableName:
     Value: !Ref EventsTable
   DesignsTableName:

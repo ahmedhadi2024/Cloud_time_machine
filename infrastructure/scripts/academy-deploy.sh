@@ -115,12 +115,29 @@ tar -czf "$BUILD_DIR/api.tar.gz" -C "$BUILD_DIR/api" .
 info "Bundle: $(du -h "$BUILD_DIR/api.tar.gz" | cut -f1)"
 
 # --------------------------------------------------------------------- upload
-# The bucket has to exist before the stack, because instances download the
-# tarball during boot. CloudFormation adopts it on the first deploy.
+# The bucket has to exist and hold the tarball before the stack is created,
+# because instances download it while booting. That is why this script owns it
+# rather than the template: CloudFormation cannot create a bucket that already
+# exists, and cannot populate one it has not created yet.
 log "Publishing the release to s3://${BUCKET}"
 if ! aws s3api head-bucket --bucket "$BUCKET" --region "$AWS_REGION" >/dev/null 2>&1; then
   aws s3 mb "s3://${BUCKET}" --region "$AWS_REGION" >/dev/null
   info "Created bucket ${BUCKET}"
+
+  aws s3api put-public-access-block --bucket "$BUCKET" --region "$AWS_REGION" \
+    --public-access-block-configuration \
+    'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true' >/dev/null
+
+  aws s3api put-bucket-encryption --bucket "$BUCKET" --region "$AWS_REGION" \
+    --server-side-encryption-configuration \
+    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' >/dev/null
+
+  # The same tiering the production stack applies, kept so the Glacier
+  # lifecycle is still part of what this deployment demonstrates.
+  aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --region "$AWS_REGION" \
+    --lifecycle-configuration '{"Rules":[{"ID":"tier-cold-objects","Status":"Enabled","Filter":{"Prefix":""},"Transitions":[{"Days":30,"StorageClass":"STANDARD_IA"},{"Days":120,"StorageClass":"GLACIER_IR"}]}]}' >/dev/null
+
+  info "Applied public access block, encryption and lifecycle rules"
 fi
 aws s3 cp "$BUILD_DIR/api.tar.gz" \
   "s3://${BUCKET}/releases/${APP_VERSION}/api.tar.gz" --region "$AWS_REGION" >/dev/null
