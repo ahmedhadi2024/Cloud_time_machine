@@ -5,6 +5,8 @@
 #   bash infrastructure/scripts/academy-destroy.sh
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/academy-common.sh"
+
 PROJECT_NAME="${PROJECT_NAME:-ctm-academy}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 STACK="${PROJECT_NAME}"
@@ -19,9 +21,7 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/n
 BUCKET="${PROJECT_NAME}-assets-${ACCOUNT_ID}"
 
 log "Deleting stack ${STACK}"
-aws cloudformation delete-stack --stack-name "$STACK" --region "$AWS_REGION"
-aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$AWS_REGION" \
-  || info "The stack did not delete cleanly; check its events in the console."
+force_delete_stack "$STACK" "$AWS_REGION" || true
 
 # The release bucket is created by academy-deploy.sh rather than by the stack,
 # so CloudFormation does not remove it. Instances no longer need it once the

@@ -14,7 +14,8 @@ PROJECT_NAME="${PROJECT_NAME:-ctm-academy}"
 AWS_REGION="${AWS_REGION:-us-east-1}"   # Learner Lab allows us-east-1 and us-west-2
 APP_VERSION="${APP_VERSION:-$(date -u +%Y%m%d-%H%M%S)}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-t3.small}"
-DESIRED_CAPACITY="${DESIRED_CAPACITY:-2}"
+
+source "$(dirname "${BASH_SOURCE[0]}")/academy-common.sh"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEMPLATE="${REPO_ROOT}/infrastructure/cloudformation/academy.yaml"
@@ -144,16 +145,19 @@ aws s3 cp "$BUILD_DIR/api.tar.gz" \
 info "Uploaded releases/${APP_VERSION}/api.tar.gz"
 
 # --------------------------------------------------------------------- deploy
-# A changeset that fails validation leaves the stack in REVIEW_IN_PROGRESS with
-# nothing in it, and a failed first create leaves ROLLBACK_COMPLETE. Both block
-# the next deploy, and neither holds any resources, so clear them out.
+# Three states block a deploy and none of them can be updated out of: a
+# changeset that failed validation leaves REVIEW_IN_PROGRESS, a failed first
+# create leaves ROLLBACK_COMPLETE, and a destroy that could not remove
+# everything leaves DELETE_FAILED. Each has to be deleted before deploying.
 STACK_STATE="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$AWS_REGION" \
   --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo 'NONE')"
-if [[ "$STACK_STATE" == "REVIEW_IN_PROGRESS" || "$STACK_STATE" == "ROLLBACK_COMPLETE" ]]; then
-  log "Clearing the empty stack left by a previous failed attempt (${STACK_STATE})"
-  aws cloudformation delete-stack --stack-name "$STACK" --region "$AWS_REGION"
-  aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$AWS_REGION" || true
-fi
+case "$STACK_STATE" in
+  REVIEW_IN_PROGRESS|ROLLBACK_COMPLETE|DELETE_FAILED|CREATE_FAILED)
+    log "Clearing the stack left by a previous attempt"
+    force_delete_stack "$STACK" "$AWS_REGION" \
+      || die "Could not clear stack ${STACK}. Delete it in the CloudFormation console, then re-run."
+    ;;
+esac
 
 log "Deploying the stack (takes about 5 minutes)"
 # Tagging every resource means Resource Groups and Tag Editor can list the
@@ -170,7 +174,6 @@ aws cloudformation deploy \
     "ReleaseBucket=${BUCKET}" \
     "AppVersion=${APP_VERSION}" \
     "InstanceType=${INSTANCE_TYPE}" \
-    "DesiredCapacity=${DESIRED_CAPACITY}" \
     "InstanceProfileName=${PROFILE}" \
     "LatestAmiId=${AMI_ID}"
 

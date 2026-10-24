@@ -32,11 +32,6 @@ Parameters:
     Type: String
     Default: t3.small
     AllowedValues: [t3.micro, t3.small, t3.medium]
-  DesiredCapacity:
-    Type: Number
-    Default: 2
-    MinValue: 1
-    MaxValue: 4
   InstanceProfileName:
     Type: String
     Default: LabInstanceProfile
@@ -268,6 +263,13 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: '15'
+      # An Auto Scaling Group would register its instances itself. These are
+      # plain instances, so they are named here.
+      Targets:
+        - Id: !Ref InstanceA
+          Port: 8080
+        - Id: !Ref InstanceB
+          Port: 8080
 
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -303,11 +305,6 @@ Resources:
               VolumeSize: 16
               VolumeType: gp3
               DeleteOnTermination: true
-        TagSpecifications:
-          - ResourceType: instance
-            Tags:
-              - Key: Name
-                Value: !Sub '${ProjectName}-api'
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
@@ -365,37 +362,38 @@ Resources:
             done
             exit 1
 
-  AutoScalingGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
+  # Two plain instances rather than an Auto Scaling Group.
+  #
+  # This lab's service control policy explicitly denies
+  # autoscaling:DescribeAutoScalingGroups, so CloudFormation cannot manage an
+  # ASG here: it creates one and is then unable to read or delete it, which
+  # strands the whole stack in DELETE_FAILED. The production stacks still use
+  # Auto Scaling with target tracking; this variant trades it for instances
+  # that can actually be cleaned up.
+  #
+  # One instance per Availability Zone, so losing an AZ still leaves the site
+  # serving, which is the point the deployment is meant to demonstrate.
+  InstanceA:
+    Type: AWS::EC2::Instance
     Properties:
-      AutoScalingGroupName: !Sub '${ProjectName}-asg'
-      MinSize: 1
-      MaxSize: 4
-      DesiredCapacity: !Ref DesiredCapacity
-      VPCZoneIdentifier:
-        - !Ref SubnetA
-        - !Ref SubnetB
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
-      TargetGroupARNs:
-        - !Ref TargetGroup
-      HealthCheckType: ELB
-      HealthCheckGracePeriod: 180
+      SubnetId: !Ref SubnetA
       Tags:
         - Key: Name
-          Value: !Sub '${ProjectName}-api'
-          PropagateAtLaunch: true
+          Value: !Sub '${ProjectName}-api-a'
 
-  CpuScalingPolicy:
-    Type: AWS::AutoScaling::ScalingPolicy
+  InstanceB:
+    Type: AWS::EC2::Instance
     Properties:
-      AutoScalingGroupName: !Ref AutoScalingGroup
-      PolicyType: TargetTrackingScaling
-      TargetTrackingConfiguration:
-        PredefinedMetricSpecification:
-          PredefinedMetricType: ASGAverageCPUUtilization
-        TargetValue: 60
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref SubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-api-b'
 
   # ------------------------------------------------------------------- alarms
   NoHealthyHostsAlarm:
@@ -444,6 +442,8 @@ Outputs:
     Value: !Sub 'http://${LoadBalancer.DNSName}'
   LoadBalancerDnsName:
     Value: !GetAtt LoadBalancer.DNSName
+  InstanceIds:
+    Value: !Join [', ', [!Ref InstanceA, !Ref InstanceB]]
   AssetsBucketName:
     Description: Created and owned by academy-deploy.sh, not by this stack.
     Value: !Ref ReleaseBucket

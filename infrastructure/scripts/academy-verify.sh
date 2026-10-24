@@ -40,14 +40,15 @@ TOTAL="$(q cloudformation describe-stack-resources --stack-name "$STACK" \
 ok "${TOTAL} resources, all CREATE_COMPLETE"
 
 # ---------------------------------------------------------------------------
-bold "EC2 + Auto Scaling — the servers running the app"
+bold "EC2 — the servers running the app"
 q ec2 describe-instances \
-  --filters "Name=tag:Name,Values=${PROJECT_NAME}-api" "Name=instance-state-name,Values=running" \
+  --filters "Name=tag:Name,Values=${PROJECT_NAME}-api-*" "Name=instance-state-name,Values=running" \
   --query 'Reservations[*].Instances[*].[InstanceId,InstanceType,Placement.AvailabilityZone,State.Name]' \
   --output text | while read -r id type az state; do info "$id  $type  $az  $state"; done
-ASG_COUNT="$(q autoscaling describe-auto-scaling-groups --auto-scaling-group-names "${PROJECT_NAME}-asg" \
-  --query 'length(AutoScalingGroups[0].Instances)' --output text)"
-ok "Auto Scaling Group holds ${ASG_COUNT} instance(s) across Availability Zones"
+AZS="$(q ec2 describe-instances \
+  --filters "Name=tag:Name,Values=${PROJECT_NAME}-api-*" "Name=instance-state-name,Values=running" \
+  --query 'Reservations[*].Instances[*].Placement.AvailabilityZone' --output text | tr '\t' '\n' | sort -u | wc -l)"
+ok "Running across ${AZS} Availability Zone(s)"
 
 # ---------------------------------------------------------------------------
 bold "Load Balancer — routing traffic to them"

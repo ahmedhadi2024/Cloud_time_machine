@@ -86,7 +86,8 @@ npm run destroy:academy
 | Kept | Dropped, and what replaces it |
 | --- | --- |
 | VPC, subnets, security groups | NAT gateway — instances sit in public subnets, reachable only from the load balancer |
-| EC2, EBS, Auto Scaling, ALB | CloudFront — the app is served straight from the load balancer |
+| EC2, EBS, ALB | CloudFront — the app is served straight from the load balancer |
+| | Auto Scaling — one plain instance per AZ instead; the lab's service control policy denies `autoscaling:DescribeAutoScalingGroups`, so CloudFormation cannot manage an ASG there |
 | S3, DynamoDB, SNS, SQS, CloudWatch | WAF, Route 53, Budgets |
 | | KMS customer keys — AWS-managed encryption instead |
 | | IAM roles — reuses `LabInstanceProfile` |
