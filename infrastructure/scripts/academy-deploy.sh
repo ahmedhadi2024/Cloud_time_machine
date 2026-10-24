@@ -156,11 +156,15 @@ if [[ "$STACK_STATE" == "REVIEW_IN_PROGRESS" || "$STACK_STATE" == "ROLLBACK_COMP
 fi
 
 log "Deploying the stack (takes about 5 minutes)"
+# Tagging every resource means Resource Groups and Tag Editor can list the
+# whole deployment on one screen, across services, which no per-service console
+# page does.
 aws cloudformation deploy \
   --stack-name "$STACK" \
   --template-file "$TEMPLATE" \
   --region "$AWS_REGION" \
   --no-fail-on-empty-changeset \
+  --tags "Project=${PROJECT_NAME}" "ManagedBy=cloudformation" \
   --parameter-overrides \
     "ProjectName=${PROJECT_NAME}" \
     "ReleaseBucket=${BUCKET}" \
