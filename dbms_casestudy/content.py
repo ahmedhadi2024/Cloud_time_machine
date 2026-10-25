@@ -264,7 +264,7 @@ op("S14", "R6. Querying embedded fields with dot notation",
   { "subscription.plan": "premium", "subscription.endDate": { $lt: new Date("2027-01-01") } },
   { _id: 0, name: 1, email: 1, "subscription.endDate": 1 }
 )""",
-"The renewal reminder list. subscription is an embedded document, and dot notation reaches into it without the whole sub-document having to be matched. The quotes around the key are required because of the dot. The projection uses dot notation as well, returning only the end date out of the subscription block.",
+"The renewal reminder list. subscription is an embedded document, and dot notation reaches into it without the whole sub-document having to be matched. The quotes around the key are required because of the dot. The projection uses dot notation as well, returning only the end date out of the subscription block. Two readers come back rather than three because this was captured after the Task 7 subscription job had run: RDR07's plan was moved to free by U6 and no longer satisfies the premium condition.",
 "R6: premium readers whose subscription expires before 2027")
 
 op("S15", "R7. Array match with a boolean filter",
