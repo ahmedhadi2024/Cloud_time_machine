@@ -339,7 +339,7 @@ op("S22", "U2. updateMany() with $set",
   { $set: { isFeatured: true } }
 )
 db.articles.find({ isFeatured: true }, { _id: 0, title: 1, views: 1, isFeatured: 1 })""",
-"A nightly job promoting anything past fifteen thousand views to the featured strip. updateMany applies the change to every matching document, unlike updateOne which stops at the first. Three articles match: ART02, ART03 and ART07. ART03 was already featured, so matchedCount is 3 while modifiedCount is 2, which is the clearest illustration of why MongoDB reports the two numbers separately.",
+"A nightly job promoting anything past fifteen thousand views to the featured strip. updateMany applies the change to every matching document, unlike updateOne which stops at the first. Four articles clear the threshold: ART01 on 15,420 views, ART02 on 22,310, ART03 on 31,050 and ART07 on 18,760. ART03 was already featured when it was inserted, so matchedCount is 4 while modifiedCount is 3. That gap is the clearest illustration of why MongoDB reports the two numbers separately: a document can satisfy the filter and still need no change.",
 "U2: updateMany() featuring every article above 15,000 views")
 
 op("S23", "U3. updateOne() with $set and $currentDate",
