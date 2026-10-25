@@ -1,7 +1,12 @@
 # Screenshot naming guide
 
 Rename each mongosh screenshot to the slot code below and drop it in this folder.
-Any of .png, .jpg or .jpeg works. Rebuild the document and the images are placed automatically.
+Any of .png, .jpg or .jpeg works. Rebuild with:
+
+    python3 build.py ./screenshots out.docx
+
+A capture too tall for one screen can be split: name the parts S17a.png and
+S17b.png and both are placed under a single caption, scaled to a common width.
 
 | Slot | Operation |
 |---|---|
@@ -34,3 +39,4 @@ Any of .png, .jpg or .jpeg works. Rebuild the document and the images are placed
 | S27.png | D1. deleteOne() |
 | S28.png | D2. deleteMany() |
 | S29.png | D3. deleteMany() on categories |
+| S30.png | Reading a stored document back in full |

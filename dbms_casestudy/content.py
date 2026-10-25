@@ -402,3 +402,12 @@ op("S29", "D3. deleteMany() on categories",
 db.categories.find({}, { _id: 1, name: 1, isActive: 1 })""",
 "Retiring the Education desk, which was inserted as inactive and has no articles filed against it. The find afterwards shows seven categories remaining. This one is worth a caveat: MongoDB does not enforce foreign keys, so deleting a category that still had articles would leave those articles pointing at a categoryId that no longer resolves, and the $lookup in R11 would return an empty array for them. The isActive flag is checked by hand here because the database will not check it for you.",
 "D3: deleteMany() removing the inactive category")
+
+op("S30", "Reading a stored document back in full",
+"""db.categories.findOne({ _id: "CAT02" })
+db.authors.findOne({ _id: "AUT01" })
+db.articles.findOne({ _id: "ART01" })
+db.readers.findOne({ _id: "RDR01" })
+db.comments.findOne({ _id: "CMT01" })""",
+"The insertMany output above confirms what went in but truncates each document at the width of the shell window. findOne prints one document down the page instead, so the structure described in Task 3 can actually be seen. The output shown is the last of the five calls, CMT01. articleId and readerId are plain string references pointing into the articles and readers collections, while replies is an array holding a complete sub-document with its own readerId, text and postedAt. Nothing joins the reply to anything: it exists only inside this comment, which is the embedding decision made visible.",
+"findOne() showing a comment document with its embedded reply")

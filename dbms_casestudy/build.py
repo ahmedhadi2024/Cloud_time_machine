@@ -126,23 +126,23 @@ def mk_table(rows, widths=None, header=True):
 FIGN = [0]
 def figure(slot, caption):
     FIGN[0] += 1
-    img = None
+    hits = []
     if SHOTS and os.path.isdir(SHOTS):
         hits = sorted(glob.glob(os.path.join(SHOTS, slot + "*")))
         hits = [h for h in hits if h.lower().endswith((".png", ".jpg", ".jpeg", ".gif"))]
-        if hits: img = hits[0]
-    if img:
+    if hits:
         from PIL import Image as _Im
-        iw, ih = _Im.open(img).size
-        w = 6.0
-        h = w * ih / iw
-        if h > 6.6:                 # keep heading, code and caption on one page
-            h = 6.6
-            w = h * iw / ih
-        p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(6)
-        p.paragraph_format.space_after = Pt(2)
-        p.add_run().add_picture(img, width=Inches(w), height=Inches(h))
+        dims = [_Im.open(i).size for i in hits]
+        # one common width, so the parts of a figure line up; total height bounded
+        budget = 6.6 if len(hits) == 1 else 8.2
+        w = min(6.0, budget / sum(ih / iw for iw, ih in dims))
+        for n, img in enumerate(hits):
+            iw, ih = dims[n]
+            h = w * ih / iw
+            p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            p.paragraph_format.space_before = Pt(6 if n == 0 else 2)
+            p.paragraph_format.space_after = Pt(2)
+            p.add_run().add_picture(img, width=Inches(w), height=Inches(h))
     else:
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(8)
@@ -228,7 +228,7 @@ emit({"S01"})
 
 h1("5. Create operations")
 blocks(TASK5_INTRO)
-emit({f"S0{i}" for i in range(2, 9)})
+emit({f"S0{i}" for i in range(2, 9)} | {"S30"})
 
 h1("6. Read operations")
 blocks(TASK6_INTRO)
