@@ -132,10 +132,17 @@ def figure(slot, caption):
         hits = [h for h in hits if h.lower().endswith((".png", ".jpg", ".jpeg", ".gif"))]
         if hits: img = hits[0]
     if img:
+        from PIL import Image as _Im
+        iw, ih = _Im.open(img).size
+        w = 6.0
+        h = w * ih / iw
+        if h > 6.6:                 # keep heading, code and caption on one page
+            h = 6.6
+            w = h * iw / ih
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(6)
         p.paragraph_format.space_after = Pt(2)
-        p.add_run().add_picture(img, width=Inches(6.0))
+        p.add_run().add_picture(img, width=Inches(w), height=Inches(h))
     else:
         p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         p.paragraph_format.space_before = Pt(8)
