@@ -280,7 +280,7 @@ op("S16", "R8. Case-insensitive search with a regular expression",
   { title: { $regex: "india", $options: "i" } },
   { _id: 0, title: 1 }
 )""",
-"The site search box. $regex matches a substring anywhere in the title, and the i option makes it case-insensitive, so the lowercase search term finds titles containing India. This is a convenience rather than a fast query: without a text index MongoDB scans every document, which is fine at ten articles and would not be at ten million.",
+"The site search box. $regex matches a substring anywhere in the title, and the i option makes it case-insensitive, so the lowercase search term finds titles containing India. The third result is worth looking at: the box office headline matches on Pan-Indian, because $regex looks for the letters anywhere in the string and does not respect word boundaries. A reader searching for India gets a film story back. This is a convenience rather than a fast query: without a text index MongoDB scans every document, which is fine at ten articles and would not be at ten million.",
 "R8: title search for india, case-insensitive")
 
 op("S17", "R9. $or combined with array position",
