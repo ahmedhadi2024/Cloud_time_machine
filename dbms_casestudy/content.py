@@ -317,7 +317,7 @@ op("S20", "R12. Aggregation with $group",
   { $project: { _id: 0, category: { $arrayElemAt: ["$cat.name", 0] }, totalArticles: 1, totalViews: 1 } },
   { $sort: { totalViews: -1 } }
 ])""",
-"The traffic report the editorial team looks at weekly. $group collapses documents that share a value: here _id: \"$categoryId\" makes one output document per category. Inside the group, $sum: 1 adds one for each article and so counts them, while $sum: \"$views\" adds up the actual view numbers. The dollar sign in front of a field name means read this document's value, which is what separates it from the literal 1. The category name is then looked up, since grouping leaves only the code behind.",
+"The traffic report the editorial team looks at weekly. $group collapses documents that share a value: here _id: \"$categoryId\" makes one output document per category. Inside the group, $sum: 1 adds one for each article and so counts them, while $sum: \"$views\" adds up the actual view numbers. The dollar sign in front of a field name means read this document's value, which is what separates it from the literal 1. The category name is then looked up, since grouping leaves only the code behind. Seven categories come back and the article counts add up to ten, not nine: this pipeline has no $match stage, so the draft is grouped along with everything else and Business shows two articles while contributing only ART04's views. R11 filters to published first and returns nine. Whether a draft belongs in a traffic report is a decision the pipeline makes, not something MongoDB decides.",
 "R12: article count and total views per category")
 
 TASK7_INTRO = [
